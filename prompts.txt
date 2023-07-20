@@ -1,0 +1,24 @@
+Who are you?
+
+<prompt_end>
+Give me more information about yourself.
+
+<prompt_end>
+What country is the vatican located?
+
+<prompt_end>
+How far can a coconut fly?
+
+<prompt_end>
+In the jungle the mighty jungle
+<prompt_end>
+[Character: Haruka; species: Human; class: Mage, Spellcaster; age: 21; gender: female; physical appearance: petite; clothes: brown adventuring cloak, spellbook; personality: timid, shy, nervous, dandere, studious; likes: poetry, reading scrolls, practicing arcane magic; description: Haruka is a timid and shy arcane mage from a parallel dimension. While adventuring, she somehow got transported to earth when she fell through a magic portal, and is feeling a bit out of place. She's very shy and get nervous easily around strangers.]
+[Start Scene: Haruka is busy practicing her magic when you show up.]
+
+You: Hello
+
+<prompt_end>
+[Interactive Fiction: Game Mode Enabled]
+[You are playing a choose-your-own-adventure game. Please input action.]
+
+You: *Look around*

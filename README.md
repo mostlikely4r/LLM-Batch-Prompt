@@ -1,5 +1,7 @@
 # LLM-Batch-Prompt
 A utility program to batch prompt multiple models using koboldcpp to quickly compare the output of different models.
+https://github.com/mostlikely4r/LLM-Batch-Prompt/blob/main/simple_output.jpg
+
 
 See also config.conf.
 

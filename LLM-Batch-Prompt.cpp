@@ -1,6 +1,8 @@
 // LLM-Batch-Prompt.cpp : This file contains the 'main' function. Program execution begins and ends there.
 //
 
+#define _SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING
+
 #include <iostream>
 #include "HTTPRequest.hpp"
 #include <regex>
@@ -8,6 +10,14 @@
 #include <TlHelp32.h>
 #include <fstream>
 #include "LLM-Batch-Prompt.h"
+#include <pdh.h>
+#include <pdhmsg.h>
+#include <psapi.h>
+#include <iomanip>
+#include <locale>
+#include <codecvt>
+#include <chrono>
+
 
 static inline void ltrim(std::string& s) {
     s.erase(s.begin(), std::find_if(s.begin(), s.end(), [](unsigned char ch) {
@@ -59,6 +69,12 @@ std::string BatchPrompter::Generate(std::string prompt, int max_length)
 {
     try
     {
+        int contextSize = 2048;
+        if (startupParams.find("--contextsize ") != std::string::npos)
+            contextSize = stoi(startupParams.substr(startupParams.find("--contextsize ") + std::string("--contextsize ").size(), 4));
+        if (params[currentModel].find("--contextsize ") != std::string::npos)
+            contextSize = stoi(params[currentModel].substr(params[currentModel].find("--contextsize ") + std::string("--contextsize ").size(), 4));
+
         http::Request request{ promptUrl };
 
         Json::Value body;
@@ -66,6 +82,12 @@ std::string BatchPrompter::Generate(std::string prompt, int max_length)
         body["prompt"] = prompt;
         for (auto param : promptParam)
         {
+            if (param.first == "max_context_length" && stoi(param.second) > contextSize)
+            {
+                body[param.first] = contextSize;
+                continue;
+            }
+
             if (param.second.find("'") == 0)
             {
                 body[param.first] = param.second.substr(1,param.second.size()-2);
@@ -136,7 +158,9 @@ bool BatchPrompter::LoadConfig()
         models.push_back(modelStr[0]);
         std::string param = "";
         for (unsigned int i = 1; i < modelStr.size(); i++)
-            param += modelStr[i];
+            param += " " + modelStr[i];
+
+        param = param.substr(1);
 
         params.push_back(param);
     }
@@ -233,11 +257,11 @@ bool BatchPrompter::LoadNextModel()
     if (currentModel > (int)models.size() - 1)
         return false;
 
-    std::string params = "--model "+ modelPath + models[currentModel] + " " + startupParams;
+    std::string strParams = "--model "+ modelPath + models[currentModel] + " " + params[currentModel] + " " + startupParams;
 
     // Set the process command-line parameters
     const char* processPath = koboldPath.c_str();
-    const char* processArgs = params.c_str();
+    const char* processArgs = strParams.c_str();
 
     // Create the process
     STARTUPINFOA startupInfo;
@@ -280,7 +304,7 @@ bool BatchPrompter::PingModel()
     }
 }
 
-bool BatchPrompter::HasModel(DWORD currentProcessId)
+std::vector<PROCESSENTRY32> BatchPrompter::GetProcesses(DWORD currentProcessId)
 {
     // Create a snapshot of the current running processes
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -292,12 +316,19 @@ bool BatchPrompter::HasModel(DWORD currentProcessId)
     PROCESSENTRY32 processEntry;
     processEntry.dwSize = sizeof(PROCESSENTRY32);
 
+    std::vector<PROCESSENTRY32> ret;
+    std::wstring_convert<std::codecvt_utf8<wchar_t>, wchar_t> converter;
+
     // Iterate through the processes in the snapshot
     if (Process32First(hSnapshot, &processEntry)) {
         do {
             // Check if the parent process ID matches the current process ID
             if (processEntry.th32ParentProcessID == currentProcessId) {
-                return true;
+                if(koboldPath.find(converter.to_bytes(processEntry.szExeFile)) != std::string::npos)
+                ret.push_back(processEntry);
+                
+                for(auto p : GetProcesses(processEntry.th32ProcessID))
+                    ret.push_back(p);
             }
         } while (Process32Next(hSnapshot, &processEntry));
     }
@@ -305,16 +336,119 @@ bool BatchPrompter::HasModel(DWORD currentProcessId)
     // Close the process snapshot handle
     CloseHandle(hSnapshot);
 
+    return ret;
+}
+
+inline LPCWSTR StringToLPCWSTR(const std::string& str) {
+    int size = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
+    wchar_t* buffer = new wchar_t[size];
+    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, buffer, size);
+    return buffer;
+}
+
+double BatchPrompter::GetDedicatedGPUMemory(DWORD processId) {
+    double memVal;
+    PDH_HQUERY hQuery;
+    PDH_HCOUNTER hCounter;
+
+    // Initialize PDH
+    if (PdhOpenQuery(nullptr, 0, &hQuery) != ERROR_SUCCESS) {
+        return 0;
+    }
+    std::string proc = "\\GPU Process Memory(pid_" + std::to_string(processId) + "_luid_0x00000000_0x0000e137_phys_0)\\Dedicated Usage";
+    if (PdhAddCounter(hQuery, StringToLPCWSTR(proc), 0, &hCounter) != ERROR_SUCCESS) {
+        PdhCloseQuery(hQuery);
+        return 0;
+    }
+
+    // Collect data and display CPU usage every second
+    PDH_FMT_COUNTERVALUE counterValue;
+    DWORD dwType;
+    if (PdhCollectQueryData(hQuery) != ERROR_SUCCESS) {
+        PdhCloseQuery(hQuery);
+        return 0;
+    }
+
+    if (PdhGetFormattedCounterValue(hCounter, PDH_FMT_DOUBLE, &dwType, &counterValue) == ERROR_SUCCESS) {
+        memVal = counterValue.doubleValue;
+    }
+    else {
+        return 0;
+    }
+
+    // Clean up
+    PdhRemoveCounter(hCounter);
+    PdhCloseQuery(hQuery);
+
+    return memVal;
+}
+
+double BatchPrompter::GetVram()
+{
+    double vramUsage = 0;
+
+    for (auto p : GetProcesses(GetCurrentProcessId()))
+    {
+        vramUsage = GetDedicatedGPUMemory(p.th32ProcessID);
+    }
+    return vramUsage;
+}
+
+double BatchPrompter::GetRam()
+{
+    double ramUsage = 0;
+    for (auto p : GetProcesses(GetCurrentProcessId()))
+    {
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, p.th32ProcessID);
+        if (hProcess == nullptr) {
+            std::cout << "Failed to open process." << std::endl;
+            return 1;
+        }
+
+        PROCESS_MEMORY_COUNTERS_EX pmc;
+        if (GetProcessMemoryInfo(hProcess, (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc))) {
+            ramUsage += pmc.WorkingSetSize;
+
+        }
+
+        CloseHandle(hProcess);
+    }
+
+    return ramUsage;
+}
+
+bool BatchPrompter::HasProces(bool firstLevel)
+{
+    std::vector<PROCESSENTRY32> procs = GetProcesses(GetCurrentProcessId());
+
+    if (firstLevel && !procs.empty())
+        return true;
+
+    for (auto p : procs)
+        if (p.th32ParentProcessID != GetCurrentProcessId())
+            return true;
+
     return false;
+}
+
+inline std::string FloatToStringWithPrecision(double value, int precision) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(precision) << value;
+    return oss.str();
 }
 
 bool BatchPrompter::GetOutput(bool write)
 {
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     if (!showKoboldOutput)
         std::cout << "Processing prompt:";
     int p = 0, pm = prompts.size();
     for (auto prompt : prompts)
     {
+        if (!PingModel())
+            break;
+
         if (!showKoboldOutput)
             std::cout << "\rProcessing prompt:" << std::to_string(p+1) << "/" << std::to_string(pm);
 
@@ -329,8 +463,15 @@ bool BatchPrompter::GetOutput(bool write)
         p++;
     }
 
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+
+    int minutes = std::chrono::duration_cast<std::chrono::minutes>(duration_ms).count();
+    int seconds = (int)std::chrono::duration_cast<std::chrono::seconds>(duration_ms % std::chrono::minutes(1)).count();
+
+
     if (!showKoboldOutput)
-        std::cout << "\rPrompts done.                                                   " << std::endl;
+        std::cout << "\rPrompts done. (VRAM: " + FloatToStringWithPrecision(GetVram()/1024/1000/1000,3) + " GB, RAM: "+ FloatToStringWithPrecision(GetRam() / 1024 / 1000 / 1000, 3) + " GB, Runtime: " << minutes << " min " << seconds << " sec) " << std::endl;
 
     return true;
 }
@@ -362,16 +503,10 @@ bool BatchPrompter::WriteOutput() {
         {
             Json::Value replyVal;
             
-            replyVal["model"] = models.first;
-            replyVal["reply"].append(models.second);
-            for (auto l : StrSplit(models.second, "\n"))
-            {
-                std::string line = l;
-                trim(line);
-                if (!line.empty())
-                    replyVal["replyLines"].append(line);
-            }
-            
+            replyVal["reply"]= models.second;
+
+            replyVal["used model"] = models.first;
+           
             promptVal["replies"].append(replyVal);
         }
 
@@ -389,9 +524,6 @@ bool BatchPrompter::WriteOutput() {
 
 bool BatchPrompter::KillModel(DWORD currentProcessId)
 {
-    if (!showKoboldOutput && currentProcessId == GetCurrentProcessId())
-        std::cout << "Unloading model: " << models[currentModel] << " " << params[currentModel] << std::endl;
-
     // Create a snapshot of the current running processes
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnapshot == INVALID_HANDLE_VALUE) {
@@ -442,16 +574,32 @@ int main()
         int retry = 0;
         while (!bp.PingModel())
         {
-            if (!bp.HasModel())
-                return 1;
+            if (!bp.HasProces(true))
+            {
+                retry = -1;
+                break;
+            }
 
             if (retry > 100)
                 return 1;
+
+            retry++;
+        }
+        
+        if (retry == -1)
+        {
+            std::cout << "Error with model " << bp.getModelName() << ", Skipping." << std::endl;
+
+            if (!bp.KillModel())
+                return 1;
+
+            bp.IncModel();
+            continue;
         }
 
         if (!bp.GetOutput())
             return 1;
-       
+     
         if (!bp.KillModel())
             return 1;
 

@@ -7,13 +7,17 @@ public:
 	bool LoadConfig();
 	bool LoadNextModel();
 	bool PingModel();
-	bool HasModel(DWORD currentProcessId = GetCurrentProcessId());
+	bool HasProces(bool firstLevel);
 	bool GetOutput(bool write = true);
 	bool WriteOutput();
 	bool KillModel(DWORD currentProcessId = GetCurrentProcessId());
-
+	std::string getModelName() { return models[currentModel]; }
 	void IncModel() { currentModel++; }
 private:
+	std::vector<PROCESSENTRY32> GetProcesses(DWORD currentProcessId);
+	double GetDedicatedGPUMemory(DWORD processId);
+	double GetVram();
+	double GetRam();
 	void LoadConfigLines();
 	void LoadPrompts();
 
@@ -25,7 +29,6 @@ private:
 	bool GetDefaultBool(std::string configName, bool defaultValue) { return GetDefaultInt(configName, defaultValue); };
 
 	std::map<std::string, std::string> configLines;
-public:
 	int currentModel = 0;
 	std::string koboldPath, modelPath, startupParams, promptFile, promptSeperator, promptUrl, promptParams, outputFile;
 	bool showKoboldOutput;

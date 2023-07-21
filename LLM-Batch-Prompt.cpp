@@ -447,7 +447,10 @@ bool BatchPrompter::GetOutput(bool write)
     for (auto prompt : prompts)
     {
         if (!PingModel())
+        {
+            std::cout << "Error while getting prompt " << (p + 1) << " for model " << getModelName() << ", Skipping to next model." << std::endl;
             break;
+        }
 
         if (!showKoboldOutput)
             std::cout << "\rProcessing prompt:" << std::to_string(p+1) << "/" << std::to_string(pm);
